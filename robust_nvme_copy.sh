@@ -14,6 +14,11 @@ TEMP_TARGET=""
 PROGRESS_FILE=""
 ERROR_LOG=""
 
+# Fan Control Variablen
+FAN_BACKUP_FILE="/tmp/fan_backup_$$"
+FAN_CONTROL_ACTIVE=false
+ORIGINAL_GOVERNOR=""
+
 # Block-Einstellungen
 BLOCK_SIZE="1M"           # dd Block-Größe
 BLOCKS_PER_CHUNK=256     # 256MB Chunks (256 * 1MB)
