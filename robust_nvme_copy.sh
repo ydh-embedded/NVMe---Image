@@ -6,8 +6,7 @@
 set -euo pipefail
 
 # Konfiguration
-SOURCE_DEVICE="/dev/nvme1n1p3"  # KORRIGIERT: p3 ist die Windows-Hauptpartition (161.26GB)
-# TARGET_FILE wird dynamisch basierend auf externer SSD gesetzt
+SOURCE_DEVICE="/dev/nvme1n1"  # KORRIGIERT: Gesamtes NVMe-Laufwerk kopieren, um Boot-Informationen zu erhalten# TARGET_FILE wird dynamisch basierend auf externer SSD gesetzt
 EXTERNAL_SSD_PATH=""
 VM_COLLECTION_NAME="qemu-vms"
 TARGET_FILE=""
@@ -786,6 +785,16 @@ perform_copy() {
         
         return 1
     fi
+
+    # Image in qcow2 konvertieren für bessere Performance und Features
+    if [[ -f "$TARGET_FILE" ]]; then
+        log_info "Konvertiere Image zu qcow2..."
+        qemu-img convert -f raw -O qcow2 "$TARGET_FILE" "${TARGET_FILE}.qcow2"
+        log_success "Konvertierung zu qcow2 abgeschlossen!"
+        log_info "Lösche RAW-Image..."
+        rm "$TARGET_FILE"
+        TARGET_FILE="${TARGET_FILE}.qcow2"
+    fi
 }
 
 # Kompression
@@ -817,7 +826,7 @@ show_qemu_commands() {
         echo "qemu-system-x86_64 -drive file=${TARGET_FILE},format=raw -m 4096 -enable-kvm -cpu host"
     elif [[ -f "$TARGET_FILE" ]]; then
         echo "Image direkt testen:"
-        echo "qemu-system-x86_64 -drive file=${TARGET_FILE},format=raw -m 4096 -enable-kvm -cpu host"
+        echo "qemu-system-x86_64 -drive file=${TARGET_FILE},format=qcow2,if=virtio -m 4096 -enable-kvm -cpu host -smp 4 -vga virtio -usb -device usb-tablet -net nic,model=virtio -net user -bios /usr/share/ovmf/OVMF.fd"
     fi
 }
 
