@@ -639,33 +639,13 @@ copy_block_with_retry() {
     return 1  # Fehlgeschlagen
 }
 
-# Hauptkopie-Funktion
+# Hauptkopie-Funktion mit ddrescue
 perform_copy() {
-    local total_size=$(cat "${PROGRESS_FILE}.total_size")
-    local chunk_size=$((BLOCKS_PER_CHUNK * 1024 * 1024))  # in Bytes
-    local total_blocks=$((total_size / chunk_size + 1))
-    
-    local current_block=0
-    local copied_bytes=0
-    local start_time=$(date +%s)
-    local failed_blocks=""
-    
-    # Fortschritt laden falls vorhanden
-    if load_progress; then
-        current_block=$CURRENT_BLOCK
-        copied_bytes=$COPIED_BYTES
-        start_time=$START_TIME
-        failed_blocks="$FAILED_BLOCKS"
-        total_blocks=$TOTAL_BLOCKS
-    fi
-    
-    log_info "Starte Copy-Vorgang:"
+    log_info "Starte Copy-Vorgang mit ddrescue:"
     log_info "  Quelle: $SOURCE_DEVICE"
-    log_info "  Ziel: $TEMP_TARGET"
-    log_info "  Chunk-Größe: $(numfmt --to=iec $chunk_size)"
-    log_info "  Kühlung: ${COOLING_PAUSE}s zwischen Chunks"
-    log_info "  Gesamt-Blocks: $total_blocks"
-    
+    log_info "  Ziel: $TARGET_FILE"
+    log_info "  Log-Datei: ${TARGET_FILE}.log"
+
     # Laptop-Lüfter auf Hochtouren wenn gewünscht
     echo ""
     read -p "$(echo -e ${YELLOW}Laptop-Lüfter auf Maximum für optimale Kühlung? [j/n]:${NC}) " fan_control
@@ -673,132 +653,27 @@ perform_copy() {
         activate_laptop_cooling
         echo ""
     fi
-    
-    # Temporäre Datei initialisieren falls neu
-    if [[ $current_block -eq 0 ]]; then
-        log_info "Initialisiere Ziel-Datei..."
-        truncate -s "$total_size" "$TEMP_TARGET"
-    fi
-    
-    echo -e "${PURPLE}╔══════════════════════════════════════════════╗${NC}"
-    echo -e "${PURPLE}║          ROBUSTE NVMe KOPIERUNG              ║${NC}"
-    echo -e "${PURPLE}╚══════════════════════════════════════════════╝${NC}"
-    
-    while [[ $current_block -lt $total_blocks ]]; do
-        local skip_bytes=$((current_block * chunk_size))
-        local skip_blocks=$((skip_bytes / 1024 / 1024))  # für dd skip parameter
-        
-        # Fortschritt anzeigen
-        local percent=$((current_block * 100 / total_blocks))
-        local elapsed=$(($(date +%s) - start_time))
-        local rate=$((copied_bytes / elapsed / 1024 / 1024))  # MB/s
-        local eta=$(( (total_size - copied_bytes) / rate / 1024 / 1024 ))
-        
-        printf "\r${BLUE}Block: %4d/%d (%2d%%) | %3dMB/s | ETA: %dm%02ds | Fehler: %d${NC}" \
-               "$current_block" "$total_blocks" "$percent" \
-               "$rate" "$((eta/60))" "$((eta%60))" \
-               "$(echo "$failed_blocks" | wc -w)"
-        
-        # Temperatur-Check vor jedem Block mit erweiterte Reaktion
-        local temp_status
-        check_nvme_temp
-        temp_status=$?
-        
-        if [[ $temp_status -eq 2 ]]; then
-            log_error "\n🔥 KRITISCHE TEMPERATUREN! Zwangs-Kühlung (60s)..."
-            sleep 60
-            # Nochmal prüfen
-            check_nvme_temp
-            temp_status=$?
-            if [[ $temp_status -eq 2 ]]; then
-                log_error "Temperaturen immer noch kritisch! Pausiere Copy für 120s..."
-                sleep 120
-            fi
-        elif [[ $temp_status -eq 1 ]]; then
-            log_warn "\n🌡️  Hohe Temperaturen - verlängere Kühlung auf 30s..."
-            sleep 30
-        fi
-        
-        # Block kopieren
-        if copy_block_with_retry "$current_block" "$skip_blocks"; then
-            copied_bytes=$((copied_bytes + chunk_size))
-        else
-            log_error "\nBlock $current_block endgültig fehlgeschlagen - markiert für späteren Retry"
-            failed_blocks="$failed_blocks $current_block"
-        fi
-        
-        ((current_block++))
-        
-        # Fortschritt speichern (alle 10 Blocks)
-        if [[ $((current_block % 10)) -eq 0 ]]; then
-            save_progress "$current_block" "$total_blocks" "$copied_bytes" "$start_time" "$failed_blocks"
-        fi
-        
-        # Kühlung (außer beim letzten Block)
-        if [[ $current_block -lt $total_blocks ]]; then
-            sleep $COOLING_PAUSE
-        fi
-    done
-    
-    echo  # Neue Zeile nach Progress-Bar
-    
-    # Fehlgeschlagene Blocks nochmal versuchen
-    if [[ -n "$failed_blocks" ]]; then
-        log_warn "Versuche fehlgeschlagene Blocks erneut..."
-        
-        for failed_block in $failed_blocks; do
-            local skip_bytes=$((failed_block * chunk_size))
-            local skip_blocks=$((skip_bytes / 1024 / 1024))
-            
-            log_info "Retry Block $failed_block..."
-            
-            if copy_block_with_retry "$failed_block" "$skip_blocks"; then
-                log_success "Block $failed_block erfolgreich im Retry"
-                failed_blocks=$(echo "$failed_blocks" | sed "s/ *$failed_block */ /g")
-            else
-                log_error "Block $failed_block auch im Retry fehlgeschlagen!"
-            fi
-            
-            sleep $((COOLING_PAUSE * 2))  # Längere Pause bei Retry
-        done
-    fi
-    
-    # Finalisierung mit Fan-Control Cleanup
-    if [[ -z "$(echo $failed_blocks | tr -d ' ')" ]]; then
-        log_success "Alle Blocks erfolgreich kopiert!"
-        mv "$TEMP_TARGET" "$TARGET_FILE"
-        rm -f "$PROGRESS_FILE" "${PROGRESS_FILE}.total_size"
-        
+
+    # ddrescue-Befehl ausführen
+    if ddrescue -f -n --verbose "$SOURCE_DEVICE" "$TARGET_FILE" "${TARGET_FILE}.log"; then
+        log_success "ddrescue-Kopiervorgang erfolgreich abgeschlossen!"
         # Fan-Control wiederherstellen
         if [[ $FAN_CONTROL_ACTIVE == true ]]; then
             echo ""
             log_info "🌀 Copy erfolgreich abgeschlossen - stelle Lüftersteuerung wieder her..."
             restore_laptop_fans
         fi
-        
         return 0
     else
-        log_error "Einige Blocks konnten nicht kopiert werden: $failed_blocks"
-        log_error "Image möglicherweise korrupt!"
-        
+        log_error "ddrescue-Kopiervorgang mit Fehlern beendet!"
+        log_error "Prüfe Log-Datei: ${TARGET_FILE}.log"
         # Auch bei Fehlern Fan-Control wiederherstellen
         if [[ $FAN_CONTROL_ACTIVE == true ]]; then
             echo ""
             log_warn "🌀 Stelle Lüftersteuerung trotz Fehlern wieder her..."
             restore_laptop_fans
         fi
-        
         return 1
-    fi
-
-    # Image in qcow2 konvertieren für bessere Performance und Features
-    if [[ -f "$TARGET_FILE" ]]; then
-        log_info "Konvertiere Image zu qcow2..."
-        qemu-img convert -f raw -O qcow2 "$TARGET_FILE" "${TARGET_FILE}.qcow2"
-        log_success "Konvertierung zu qcow2 abgeschlossen!"
-        log_info "Lösche RAW-Image..."
-        rm "$TARGET_FILE"
-        TARGET_FILE="${TARGET_FILE}.qcow2"
     fi
 }
 
